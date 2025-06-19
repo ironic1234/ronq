@@ -5,57 +5,60 @@
 #include <vector>
 #include <thread>
 
+/// Executes a shell command with stdout and stderr merged into one pipe.
+///
+/// This function redirects both stdout and stderr to the provided file descriptor
+/// and then uses `execl` to execute the command via `/bin/sh -c`.
+///
+/// @param cmd The shell command to execute.
+/// @param write_fd File descriptor to redirect output.
+void exec_command(const char* cmd, int write_fd) {
+    dup2(write_fd, STDOUT_FILENO);
+    dup2(write_fd, STDERR_FILENO);
+    close(write_fd);
+
+    execl("/bin/sh", "sh", "-c", cmd, (char*)NULL);
+    perror("exec failed");
+    _exit(1);
+}
+
+/// Reads output from a file descriptor and prints it with color.
+///
+/// Since both stdout and stderr are merged, this function applies a consistent
+/// prefix and color to all lines. (Green is used by default.)
+///
+/// @param cmd The command name to display in the output prefix.
+/// @param read_fd File descriptor to read from.
+void handle_output(const char* cmd, int read_fd) {
+    FILE* stream = fdopen(read_fd, "r");
+    char buffer[4096];
+    while (fgets(buffer, sizeof(buffer), stream)) {
+        std::cout << "\033[32m[" << cmd << "]\033[0m " << buffer;
+    }
+    fclose(stream);
+}
+
+/// Runs a shell command in a subprocess and displays output in color.
+///
+/// Spawns a child process to execute the command, capturing both stdout and stderr
+/// through a pipe. Output is prefixed with the command name and printed in green.
+///
+/// @param cmd The shell command to execute.
 void run_command(const char* cmd) {
     int pipefd[2];
     pipe(pipefd);
-    pid_t grandchild = fork();
-    if (grandchild == 0) {
-        // Grandchild: set up error prefixing for stderr
+
+    pid_t child = fork();
+    if (child == 0) {
+        // In child
         close(pipefd[0]);
-        int err_pipe[2];
-        pipe(err_pipe);
-        pid_t err_fork = fork();
-        if (err_fork == 0) {
-            // Error prefixing process
-            close(err_pipe[1]);
-            FILE* err_stream = fdopen(err_pipe[0], "r");
-            char err_buf[4096];
-            while (fgets(err_buf, sizeof(err_buf), err_stream)) {
-                // Prefix stderr lines
-                dprintf(pipefd[1], "STDERR:%s", err_buf);
-            }
-            fclose(err_stream);
-            _exit(0);
-        } else {
-            // Grandchild: redirect stderr to err_pipe
-            close(err_pipe[0]);
-            dup2(err_pipe[1], STDERR_FILENO);
-            close(err_pipe[1]);
-            // Redirect stdout directly to pipe
-            dup2(pipefd[1], STDOUT_FILENO);
-            close(pipefd[1]);
-            execl("/bin/sh", "sh", "-c", cmd, (char*)NULL);
-            perror("exec failed");
-            _exit(1);
-        }
+        exec_command(cmd, pipefd[1]);
     } else {
-        // Parent (child of main): read from pipe, color output
+        // In parent
         close(pipefd[1]);
-        FILE* stream = fdopen(pipefd[0], "r");
-        char buffer[4096];
-        while (fgets(buffer, sizeof(buffer), stream)) {
-            std::string line(buffer);
-            if (line.rfind("STDERR:", 0) == 0) {
-                // Red for errors
-                std::cout << "\033[31m[" << cmd << "]\033[0m " << line.substr(7);
-            } else {
-                // Green for normal output
-                std::cout << "\033[32m[" << cmd << "]\033[0m " << line;
-            }
-        }
-        fclose(stream);
+        handle_output(cmd, pipefd[0]);
         int status;
-        waitpid(grandchild, &status, 0);
+        waitpid(child, &status, 0);
     }
 }
 
